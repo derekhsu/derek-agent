@@ -16,9 +16,9 @@ def test_storage_import():
 
 def test_core_imports():
     """Test core module imports."""
-    from src.core.skill_registry import SkillRegistry
+    from src.core.skills import SkillDirectories
     from src.core.mcp_client import MCPClientManager
-    print("✓ skill_registry module OK")
+    print("✓ skills module OK")
     print("✓ mcp_client module OK")
 
 

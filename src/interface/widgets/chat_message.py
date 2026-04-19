@@ -85,7 +85,7 @@ class ChatMessage(Vertical):
     }
     """
 
-    def __init__(self, role: str, content: str, timestamp: str | None = None, mcp_phase: str | None = None):
+    def __init__(self, role: str, content: str, timestamp: str | None = None, mcp_phase: str | None = None, source_type: str | None = None):
         """Initialize chat message.
 
         Args:
@@ -93,12 +93,14 @@ class ChatMessage(Vertical):
             content: Message content.
             timestamp: Optional timestamp string.
             mcp_phase: Optional MCP activity phase (start/success/error).
+            source_type: Optional source type ("mcp" or "builtin").
         """
         super().__init__()
         self.role = role
         self.content = content
         self.timestamp = timestamp
         self.mcp_phase = mcp_phase
+        self.source_type = source_type
         self._first_update = True
 
     def compose(self):
@@ -112,7 +114,13 @@ class ChatMessage(Vertical):
         if self.role == "system" and self.mcp_phase:
             self.add_class("mcp-activity")
             self.add_class(self.mcp_phase)
-            sender = "MCP"
+            # Show tag based on source type
+            if self.source_type == "mcp":
+                sender = "MCP"
+            elif self.source_type == "builtin":
+                sender = "TOOL"
+            else:
+                sender = "系統"
         elif self.role == "user":
             sender = "你"
         elif self.role == "assistant":

@@ -22,9 +22,32 @@ class WebSearchConfig(BaseModel):
 class AgentSearchConfig(BaseModel):
     """Per-agent web search overrides."""
 
-    enabled: bool = False
+    enabled: bool = True
     provider: str | None = None
     api_key: str | None = None
+
+
+class AgentShellConfig(BaseModel):
+    """Per-agent shell tool overrides."""
+
+    enabled: bool = True
+    base_dir: str | None = None
+
+
+class AgentFileConfig(BaseModel):
+    """Per-agent file tool overrides."""
+
+    enabled: bool = True
+    base_dir: str | None = None
+
+
+class AgentCrawlerConfig(BaseModel):
+    """Per-agent crawler tool overrides."""
+
+    enabled: bool = True
+    output_format: str = "markdown"  # txt, json, xml, markdown, csv, html
+    target_language: str | None = None  # ISO 639-1 format, e.g., "zh", "en"
+    max_urls: int = 10  # Max URLs to crawl per request
 
 
 class MCPConfig(BaseModel):
@@ -49,8 +72,14 @@ class AgentConfig(BaseModel):
     description: str | None = None
     skills: list[str] = Field(default_factory=list)
     mcp_servers: list[MCPConfig] = Field(default_factory=list)
+    inherit_default_skills: bool = True
     inherit_default_mcp: bool = True
     search: AgentSearchConfig = Field(default_factory=AgentSearchConfig)
+    shell: AgentShellConfig = Field(default_factory=AgentShellConfig)
+    file: AgentFileConfig = Field(default_factory=AgentFileConfig)
+    crawler: AgentCrawlerConfig = Field(default_factory=AgentCrawlerConfig)
+    working_dir: str | None = None
+    add_datetime_to_context: bool = True
 
 
 class StorageConfig(BaseModel):
@@ -72,6 +101,7 @@ class UIConfig(BaseModel):
 class Settings(BaseModel):
     """Global settings."""
 
+    user_id: str = "default"
     default_agent: str = "default"
     storage: StorageConfig = Field(default_factory=StorageConfig)
     ui: UIConfig = Field(default_factory=UIConfig)
@@ -157,7 +187,7 @@ class Config:
             yaml.dump(settings.model_dump(), f, allow_unicode=True, sort_keys=False)
 
     def _load_agents(self) -> list[AgentConfig]:
-        """Load agent configurations from YAML file with MCP inheritance."""
+        """Load agent configurations from YAML file with inheritance."""
         if not self.agents_file.exists():
             # Create default agents
             default_agents = self._create_default_agents()
@@ -169,10 +199,33 @@ class Config:
                 data = yaml.safe_load(f) or {}
             agents_data = data.get("agents", [])
             agents = [AgentConfig(**agent_data) for agent_data in agents_data]
+            agents = self._apply_skill_inheritance(agents)
             return self._apply_mcp_inheritance(agents)
         except Exception as e:
             print(f"Warning: Failed to load agents: {e}. Using defaults.")
             return self._create_default_agents()
+
+    def _apply_skill_inheritance(self, agents: list[AgentConfig]) -> list[AgentConfig]:
+        default_agent = None
+        for agent in agents:
+            if agent.id == "default":
+                default_agent = agent
+                break
+
+        if not default_agent or not default_agent.skills:
+            return agents
+
+        for agent in agents:
+            if agent.id == "default":
+                continue
+            if not agent.inherit_default_skills:
+                continue
+
+            for default_skill in default_agent.skills:
+                if default_skill not in agent.skills:
+                    agent.skills.append(default_skill)
+
+        return agents
 
     def _apply_mcp_inheritance(self, agents: list[AgentConfig]) -> list[AgentConfig]:
         """Apply MCP server inheritance from default agent to other agents.

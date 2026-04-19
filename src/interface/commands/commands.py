@@ -202,6 +202,8 @@ def register_all_commands() -> None:
     """Register all built-in commands."""
     from .registry import get_command_registry
     from .mcp_command import MCPCommand
+    from .skills_command import SkillsCommand
+    from .memories_command import MemoriesCommand
 
     registry = get_command_registry()
     registry.register(QuitCommand)
@@ -211,3 +213,5 @@ def register_all_commands() -> None:
     registry.register(ClearCommand)
     registry.register(CompactCommand)
     registry.register(MCPCommand)
+    registry.register(SkillsCommand)
+    registry.register(MemoriesCommand)

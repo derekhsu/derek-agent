@@ -7,7 +7,7 @@ from pathlib import Path
 
 import aiosqlite
 
-from .base import BaseStorage, Message, Session
+from .base import BaseStorage, Message, Session, UsageMetrics
 
 
 class SQLiteStorage(BaseStorage):
@@ -57,6 +57,7 @@ class SQLiteStorage(BaseStorage):
                 content TEXT NOT NULL,
                 timestamp TEXT NOT NULL,
                 metadata TEXT,
+                metrics TEXT,
                 FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
             )
             """
@@ -66,6 +67,13 @@ class SQLiteStorage(BaseStorage):
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id)"
         )
+
+        # Migration: Add metrics column if it doesn't exist (for existing databases)
+        try:
+            await db.execute("ALTER TABLE messages ADD COLUMN metrics TEXT")
+        except sqlite3.OperationalError:
+            # Column already exists
+            pass
 
         await db.commit()
 
@@ -190,10 +198,12 @@ class SQLiteStorage(BaseStorage):
         """Add a message to a session."""
         db = await self._get_db()
 
+        metrics_json = json.dumps(message.metrics.to_dict()) if message.metrics else None
+
         await db.execute(
             """
-            INSERT INTO messages (session_id, role, content, timestamp, metadata)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO messages (session_id, role, content, timestamp, metadata, metrics)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
                 session_id,
@@ -201,6 +211,7 @@ class SQLiteStorage(BaseStorage):
                 message.content,
                 message.timestamp.isoformat(),
                 json.dumps(message.metadata),
+                metrics_json,
             ),
         )
 
@@ -232,6 +243,7 @@ class SQLiteStorage(BaseStorage):
                 content=row["content"],
                 timestamp=datetime.fromisoformat(row["timestamp"]),
                 metadata=json.loads(row["metadata"]) if row["metadata"] else {},
+                metrics=UsageMetrics.from_dict(json.loads(row["metrics"])) if row["metrics"] else None,
             )
             for row in rows
         ]

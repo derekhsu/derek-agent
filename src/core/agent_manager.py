@@ -4,14 +4,18 @@ import uuid
 from typing import Any
 
 from agno.agent import Agent
+from agno.db.sqlite import SqliteDb
 from agno.models.anthropic import Claude
 from agno.models.openai import OpenAIChat
 
-from ..storage import Message, Session, SQLiteStorage
+from ..storage import Message, Session, SQLiteStorage, UsageMetrics
 from ..tools.web_search import create_search_tool
+from ..tools.shell import create_shell_tool
+from ..tools.file import create_file_tool
+from ..tools.crawler import create_crawler_tool
 from .config import AgentConfig, get_config, logger
 from .mcp_client import MCPClientManager, get_mcp_manager
-from .skill_registry import SkillRegistry, get_skill_registry
+from .skills import build_agent_skills
 
 
 class AgentInstance:
@@ -22,6 +26,7 @@ class AgentInstance:
         config: AgentConfig,
         agent: Agent,
         mcp_manager: MCPClientManager,
+        user_id: str = "default",
     ):
         """Initialize agent instance.
 
@@ -29,34 +34,44 @@ class AgentInstance:
             config: Agent configuration.
             agent: Agno Agent instance.
             mcp_manager: MCP client manager.
+            user_id: User identifier for memory persistence.
         """
         self.config = config
         self.agent = agent
         self.mcp_manager = mcp_manager
+        self.user_id = user_id
 
-    async def run(self, message: str, **kwargs: Any) -> Any:
-        """Run the agent with a message.
+    async def run(self, messages: list[dict] | str, **kwargs: Any) -> Any:
+        """Run the agent with messages.
 
         Args:
-            message: User message.
+            messages: List of message dicts with 'role' and 'content' keys,
+                     or a single message string for backward compatibility.
             **kwargs: Additional arguments for agent.run.
 
         Returns:
             Agent response.
         """
-        return await self.agent.arun(message, **kwargs)
+        # Ensure user_id is passed for memory persistence
+        if "user_id" not in kwargs:
+            kwargs["user_id"] = self.user_id
+        return await self.agent.arun(messages, **kwargs)
 
-    def run_stream(self, message: str, **kwargs: Any) -> Any:
+    def run_stream(self, messages: list[dict] | str, **kwargs: Any) -> Any:
         """Run the agent with streaming response.
 
         Args:
-            message: User message.
+            messages: List of message dicts with 'role' and 'content' keys,
+                     or a single message string for backward compatibility.
             **kwargs: Additional arguments for agent.arun.
 
         Returns:
             Streaming response (async generator).
         """
-        return self.agent.arun(message, stream=True, **kwargs)
+        # Ensure user_id is passed for memory persistence
+        if "user_id" not in kwargs:
+            kwargs["user_id"] = self.user_id
+        return self.agent.arun(messages, stream=True, **kwargs)
 
     async def cleanup(self) -> None:
         """Cleanup resources."""
@@ -91,6 +106,40 @@ class AgentInstance:
             True if server was enabled.
         """
         return self.mcp_manager.enable_server(name)
+
+    def get_skills(self) -> list[dict[str, str]]:
+        """Get available file-based skills for this agent."""
+        skills = getattr(self.agent, "skills", None)
+        if skills is None:
+            return []
+
+        result: list[dict[str, str]] = []
+        for skill in skills.get_all_skills():
+            result.append(
+                {
+                    "name": skill.name,
+                    "description": skill.description,
+                }
+            )
+        return result
+
+    def get_memories(self) -> list[dict[str, Any]]:
+        """Get user memories for this agent.
+
+        Returns:
+            List of memory dicts with 'memory' and 'created_at' keys.
+        """
+        try:
+            memories = self.agent.get_user_memories(user_id=self.user_id)
+            return [
+                {
+                    "memory": getattr(m, "memory", str(m)),
+                    "created_at": getattr(m, "created_at", None),
+                }
+                for m in memories
+            ]
+        except Exception as e:
+            return []
 
 
 def parse_model_string(model_str: str) -> tuple[str, str]:
@@ -138,16 +187,13 @@ class AgentManager:
 
     def __init__(
         self,
-        skill_registry: SkillRegistry | None = None,
         mcp_manager: MCPClientManager | None = None,
     ):
         """Initialize agent manager.
 
         Args:
-            skill_registry: Optional skill registry.
             mcp_manager: Optional MCP client manager.
         """
-        self.skill_registry = skill_registry or get_skill_registry()
         self.mcp_manager = mcp_manager or get_mcp_manager()
         self._active_instances: dict[str, AgentInstance] = {}
 
@@ -164,11 +210,9 @@ class AgentManager:
         provider, model_id = parse_model_string(config.model)
         model = create_model(provider, model_id)
 
-        # Resolve skills
+        agent_skills = build_agent_skills(config)
+
         tools = []
-        if config.skills:
-            skill_tools = self.skill_registry.resolve_skill_references(config.skills)
-            tools.extend(skill_tools)
 
         # Setup MCP servers
         if config.mcp_servers:
@@ -182,21 +226,49 @@ class AgentManager:
             tools.append(search_tool)
             logger.info(f"Enabled web search ({config.search.provider or global_search_config.provider}) for agent: {config.id}")
 
-        # Create Agno Agent
+        # Setup shell tool
+        shell_tool = create_shell_tool(config.shell, working_dir=config.working_dir)
+        if shell_tool is not None:
+            tools.append(shell_tool)
+            logger.info(f"Enabled shell tool for agent: {config.id}")
+
+        # Setup file tool
+        file_tool = create_file_tool(config.file, working_dir=config.working_dir)
+        if file_tool is not None:
+            tools.append(file_tool)
+            logger.info(f"Enabled file tool for agent: {config.id}")
+
+        # Setup crawler tool
+        crawler_tool = create_crawler_tool(config.crawler)
+        if crawler_tool is not None:
+            tools.append(crawler_tool)
+            logger.info(f"Enabled crawler tool for agent: {config.id}")
+
+        # Setup Agno memory database
+        db_path = get_config().settings.storage.path
+        agno_db = SqliteDb(db_file=db_path) if db_path else None
+
+        # Create Agno Agent with memory enabled
         agent = Agent(
             model=model,
             description=config.description or config.system_prompt,
             instructions=config.system_prompt,
+            skills=agent_skills,
             tools=tools if tools else None,
             markdown=True,
             add_history_to_context=True,
             num_history_runs=10,
+            db=agno_db,
+            enable_agentic_memory=True,
+            add_datetime_to_context=config.add_datetime_to_context,
+            timezone_identifier="Asia/Taipei",
         )
 
         instance = AgentInstance(
             config=config,
             agent=agent,
             mcp_manager=self.mcp_manager,
+            user_id=get_config().settings.user_id,
         )
 
         self._active_instances[config.id] = instance
@@ -325,18 +397,19 @@ class ConversationManager:
         """
         return await self.storage.list_sessions(agent_id, limit)
 
-    async def add_message(self, session_id: str, role: str, content: str) -> Message:
+    async def add_message(self, session_id: str, role: str, content: str, metrics: "UsageMetrics | None" = None) -> Message:
         """Add a message to a session.
 
         Args:
             session_id: Session ID.
             role: Message role (user/assistant/system).
             content: Message content.
+            metrics: Optional token usage metrics.
 
         Returns:
             Created Message.
         """
-        message = Message(role=role, content=content)
+        message = Message(role=role, content=content, metrics=metrics)
         await self.storage.add_message(session_id, message)
         return message
 

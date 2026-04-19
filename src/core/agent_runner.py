@@ -4,16 +4,45 @@ import asyncio
 from typing import Any, AsyncIterator, Callable
 
 from agno.agent import RunEvent
+from agno.utils.tokens import count_text_tokens
 
-from ..storage import Message, Session, SQLiteStorage
-from .agent_manager import AgentManager, ConversationManager, get_agent_manager, get_conversation_manager
+from ..storage import Message, Session, SQLiteStorage, UsageMetrics
+from .agent_manager import AgentManager, ConversationManager, get_agent_manager, get_conversation_manager, parse_model_string
 from .config import get_config, logger
-from .mcp_client import get_mcp_manager
-from .skill_registry import get_skill_registry
 
 
 class AgentRunner:
     """Main runner for executing agent conversations."""
+
+    @staticmethod
+    def _build_usage_metrics(agno_metrics: Any) -> UsageMetrics | None:
+        """Build UsageMetrics from Agno metrics object."""
+        if not agno_metrics:
+            return None
+
+        return UsageMetrics(
+            input_tokens=getattr(agno_metrics, "input_tokens", 0),
+            output_tokens=getattr(agno_metrics, "output_tokens", 0),
+            total_tokens=getattr(agno_metrics, "total_tokens", 0),
+            cost=getattr(agno_metrics, "cost", None),
+            audio_input_tokens=getattr(agno_metrics, "audio_input_tokens", 0),
+            audio_output_tokens=getattr(agno_metrics, "audio_output_tokens", 0),
+            cache_read_tokens=getattr(agno_metrics, "cache_read_tokens", 0),
+            cache_write_tokens=getattr(agno_metrics, "cache_write_tokens", 0),
+            reasoning_tokens=getattr(agno_metrics, "reasoning_tokens", 0),
+        )
+
+    def _get_current_model_id(self) -> str:
+        """Get current model id for token estimation."""
+        if not self._current_agent_id:
+            return "gpt-4o"
+
+        agent_config = self.config.get_agent(self._current_agent_id)
+        if not agent_config:
+            return "gpt-4o"
+
+        _, model_id = parse_model_string(agent_config.model)
+        return model_id
 
     def __init__(
         self,
@@ -108,6 +137,99 @@ class AgentRunner:
             await self.agent_manager.load_agent(session.agent_id)
         return session
 
+    def _resolve_tool_info(self, raw_tool_name: str | None) -> tuple[str | None, str | None, str]:
+        """Resolve tool name to source and display name.
+
+        Args:
+            raw_tool_name: Raw tool name from Agno.
+
+        Returns:
+            Tuple of (source_type, source_name, tool_name).
+            source_type: "mcp", "builtin", or None
+        """
+        if not raw_tool_name:
+            return None, None, ""
+
+        # Check if it's an MCP tool first
+        server_name, tool_name = self.agent_manager.mcp_manager.resolve_tool_name(raw_tool_name)
+        if server_name is not None:
+            return "mcp", server_name, tool_name
+
+        # Check for built-in tools by prefix patterns
+        builtin_prefixes = {
+            "shell_tools_": ("shell", "shell"),
+            "file_tools_": ("file", "file"),
+            "trafilatura_tools_": ("crawler", "trafilatura"),
+            "duckduckgo_": ("web_search", "duckduckgo"),
+            "tavily_": ("web_search", "tavily"),
+            "websearch_": ("web_search", "websearch"),
+        }
+
+        for prefix, (source_name, _) in builtin_prefixes.items():
+            if raw_tool_name.startswith(prefix):
+                tool_name = raw_tool_name[len(prefix):]
+                return "builtin", source_name, tool_name
+
+        # Unknown tool - treat as built-in with generic name
+        return "builtin", "builtin", raw_tool_name
+
+    def _build_tool_activity(
+        self,
+        raw_tool_name: str | None,
+        event_name: str,
+        tool: Any,
+        chunk: Any,
+    ) -> dict[str, Any] | None:
+        """Build tool activity info for display.
+
+        Args:
+            raw_tool_name: Raw tool name from Agno.
+            event_name: Event type (started/completed/error).
+            tool: Tool object from Agno.
+            chunk: Response chunk from Agno.
+
+        Returns:
+            Activity dict or None if not a trackable tool.
+        """
+        source_type, source_name, tool_name = self._resolve_tool_info(raw_tool_name)
+
+        if source_type is None:
+            return None
+
+        # Determine phase
+        if event_name == RunEvent.tool_call_started.value:
+            phase = "start"
+        elif event_name == RunEvent.tool_call_completed.value:
+            phase = "success"
+        else:  # error
+            phase = "error"
+
+        activity: dict[str, Any] = {
+            "phase": phase,
+            "tool_name": tool_name,
+            "source_type": source_type,
+            "source_name": source_name,
+        }
+
+        # Collect parameter names for start event
+        if event_name == RunEvent.tool_call_started.value:
+            parameters = getattr(tool, "parameters", None) or getattr(tool, "arguments", None)
+            if parameters and isinstance(parameters, dict):
+                activity["param_names"] = list(parameters.keys())
+
+        # Collect result preview for completed event
+        if event_name == RunEvent.tool_call_completed.value:
+            result = getattr(chunk, "result", None) or getattr(chunk, "content", None)
+            if result:
+                result_str = str(result)[:20]  # First 20 chars as requested
+                activity["result_preview"] = result_str
+
+        # Collect error info
+        if event_name == RunEvent.tool_call_error.value:
+            activity["error"] = getattr(chunk, "error", None)
+
+        return activity
+
     async def send_message(
         self,
         message: str,
@@ -130,27 +252,48 @@ class AgentRunner:
         if not self._current_agent_id:
             raise RuntimeError("No agent selected")
 
-        # Save user message
-        await self.conversation_manager.add_message(
-            self._current_session.id, "user", message
-        )
-
         # Get agent instance
         agent_instance = self.agent_manager.get_agent(self._current_agent_id)
         if not agent_instance:
             raise RuntimeError(f"Agent not loaded: {self._current_agent_id}")
 
-        # Run agent
+        # Load conversation history and build messages list
+        history = await self.get_conversation_history()
+        messages = []
+        for msg in history:
+            if msg.role in ("user", "assistant"):
+                messages.append({"role": msg.role, "content": msg.content})
+        # Add current user message
+        messages.append({"role": "user", "content": message})
+
+        # Save user message (no metrics for user message)
+        await self.conversation_manager.add_message(
+            self._current_session.id, "user", message
+        )
+
+        # Run agent and capture metrics
+        response_metrics = None
+
         if stream_callback:
             # Streaming mode
             response_text = ""
-            async for chunk in agent_instance.run_stream(message, stream_events=True):
+            async for chunk in agent_instance.run_stream(messages, stream_events=True):
                 event_name = getattr(chunk, "event", None)
                 if event_name == RunEvent.run_content.value:
                     content = getattr(chunk, "content", None)
                     if content:
                         response_text += content
                         stream_callback(content)
+                    continue
+
+                if event_name == RunEvent.run_completed.value:
+                    completed_content = getattr(chunk, "content", None)
+                    if completed_content and not response_text:
+                        response_text = str(completed_content)
+                        stream_callback(response_text)
+                    response_metrics = self._build_usage_metrics(
+                        getattr(chunk, "metrics", None)
+                    )
                     continue
 
                 if mcp_activity_callback and event_name in {
@@ -160,36 +303,23 @@ class AgentRunner:
                 }:
                     tool = getattr(chunk, "tool", None)
                     raw_tool_name = getattr(tool, "tool_name", None)
-                    server_name, tool_name = self.agent_manager.mcp_manager.resolve_tool_name(raw_tool_name)
-                    if server_name is not None:
-                        activity: dict[str, Any] = {
-                            "phase": "start" if event_name == RunEvent.tool_call_started.value else "success",
-                            "server_name": server_name,
-                            "tool_name": tool_name,
-                        }
-                        # Collect parameter names for start event
-                        if event_name == RunEvent.tool_call_started.value:
-                            parameters = getattr(tool, "parameters", None) or getattr(tool, "arguments", None)
-                            if parameters and isinstance(parameters, dict):
-                                activity["param_names"] = list(parameters.keys())
-                        # Collect result preview for completed event
-                        if event_name == RunEvent.tool_call_completed.value:
-                            result = getattr(chunk, "result", None) or getattr(chunk, "content", None)
-                            if result:
-                                result_str = str(result)[:50]  # First 50 chars
-                                activity["result_preview"] = result_str
-                        if event_name == RunEvent.tool_call_error.value:
-                            activity["phase"] = "error"
-                            activity["error"] = getattr(chunk, "error", None)
+                    activity = self._build_tool_activity(
+                        raw_tool_name, event_name, tool, chunk
+                    )
+                    if activity:
                         mcp_activity_callback(activity)
+
+            # For streaming mode, we need to get metrics from the response object
+            # Note: Agno streaming doesn't provide metrics in chunks, metrics are in the final response
         else:
             # Non-streaming mode
-            response = await agent_instance.run(message)
+            response = await agent_instance.run(messages)
             response_text = getattr(response, "content", str(response))
+            response_metrics = self._build_usage_metrics(getattr(response, "metrics", None))
 
-        # Save assistant message
+        # Save assistant message with metrics
         await self.conversation_manager.add_message(
-            self._current_session.id, "assistant", response_text
+            self._current_session.id, "assistant", response_text, metrics=response_metrics
         )
 
         return response_text
@@ -207,6 +337,35 @@ class AgentRunner:
         if session:
             return session.messages
         return []
+
+    async def estimate_context_tokens(self, pending_message: str | None = None) -> int:
+        """Estimate context tokens for the current conversation."""
+        history = await self.get_conversation_history()
+        model_id = self._get_current_model_id()
+        total = 0
+
+        for msg in history:
+            if msg.role in ("user", "assistant"):
+                total += count_text_tokens(f"{msg.role}: {msg.content}", model_id)
+
+        if pending_message:
+            total += count_text_tokens(f"user: {pending_message}", model_id)
+
+        return total
+
+    async def get_session_metrics(self) -> "UsageMetrics | None":
+        """Get total token usage metrics for current session.
+
+        Returns:
+            UsageMetrics with aggregated totals, or None if no session.
+        """
+        if not self._current_session:
+            return None
+
+        session = await self.conversation_manager.get_session(self._current_session.id)
+        if session:
+            return session.get_total_metrics()
+        return None
 
     def get_current_agent_name(self) -> str | None:
         """Get current agent name.
@@ -285,6 +444,24 @@ class AgentRunner:
         if not agent_instance:
             return False
         return agent_instance.enable_mcp_server(name)
+
+    def get_current_agent_skills(self) -> list[dict[str, str]] | None:
+        """Get available skills for the current agent."""
+        if not self._current_agent_id:
+            return None
+        agent_instance = self.agent_manager.get_agent(self._current_agent_id)
+        if not agent_instance:
+            return None
+        return agent_instance.get_skills()
+
+    def get_current_agent_memories(self) -> list[dict[str, Any]] | None:
+        """Get user memories for the current agent."""
+        if not self._current_agent_id:
+            return None
+        agent_instance = self.agent_manager.get_agent(self._current_agent_id)
+        if not agent_instance:
+            return None
+        return agent_instance.get_memories()
 
 
 # Global runner instance
