@@ -1,0 +1,12 @@
+#!/bin/bash
+
+# === Port Configuration ===
+export PORT=${CONDUCTOR_PORT:-3000}
+
+# === Config Directory ===
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+export DEREK_AGENT_CONFIG_DIR="${DEREK_AGENT_CONFIG_DIR:-$SCRIPT_DIR/../.derek-agent}"
+
+# Run the Derek Agent
+cd "$SCRIPT_DIR/.."
+exec uv run python main.py "$@"

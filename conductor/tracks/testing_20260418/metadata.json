@@ -1,0 +1,8 @@
+{
+  "track_id": "testing_20260418",
+  "type": "feature",
+  "status": "new",
+  "created_at": "2026-04-18T12:23:02Z",
+  "updated_at": "2026-04-18T12:23:02Z",
+  "description": "Strengthen automated test coverage for core runtime and TUI startup"
+}

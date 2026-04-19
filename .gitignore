@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.env
+.env.*
+
+# Derek Agent local config (may contain API keys)
+.derek-agent/
+
+# Logs
+*.log
