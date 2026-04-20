@@ -87,6 +87,7 @@ class StorageConfig(BaseModel):
 
     type: str = "sqlite"
     path: str | None = None
+    url: str | None = None
 
 
 class UIConfig(BaseModel):

@@ -1,6 +1,7 @@
 """Agent manager for Derek Agent Runner."""
 
 import uuid
+from pathlib import Path
 from typing import Any
 
 from agno.agent import Agent
@@ -8,7 +9,7 @@ from agno.db.sqlite import SqliteDb
 from agno.models.anthropic import Claude
 from agno.models.openai import OpenAIChat
 
-from ..storage import Message, Session, SQLiteStorage, UsageMetrics
+from ..storage import BaseStorage, Message, Session, UsageMetrics
 from ..tools.web_search import create_search_tool
 from ..tools.shell import create_shell_tool
 from ..tools.file import create_file_tool
@@ -182,6 +183,21 @@ def create_model(provider: str, model_id: str, **kwargs: Any) -> Any:
             return OpenAIChat(id=model_id, **kwargs)
 
 
+def resolve_agno_sqlite_db_path() -> str | None:
+    """Resolve SQLite database path for Agno memory when available."""
+    storage_config = get_config().settings.storage
+    if storage_config.type != "sqlite":
+        return None
+
+    if storage_config.path:
+        return storage_config.path
+
+    if storage_config.url and storage_config.url.startswith("sqlite:///"):
+        return str(Path(storage_config.url.removeprefix("sqlite:///")))
+
+    return None
+
+
 class AgentManager:
     """Manager for creating and managing agent instances."""
 
@@ -245,7 +261,7 @@ class AgentManager:
             logger.info(f"Enabled crawler tool for agent: {config.id}")
 
         # Setup Agno memory database
-        db_path = get_config().settings.storage.path
+        db_path = resolve_agno_sqlite_db_path()
         agno_db = SqliteDb(db_file=db_path) if db_path else None
 
         # Create Agno Agent with memory enabled
@@ -342,7 +358,7 @@ class AgentManager:
 class ConversationManager:
     """Manages conversations/sessions for agents."""
 
-    def __init__(self, storage: SQLiteStorage):
+    def __init__(self, storage: BaseStorage):
         """Initialize conversation manager.
 
         Args:
@@ -438,7 +454,7 @@ def get_agent_manager() -> AgentManager:
     return _agent_manager
 
 
-def get_conversation_manager(storage: SQLiteStorage | None = None) -> ConversationManager:
+def get_conversation_manager(storage: BaseStorage | None = None) -> ConversationManager:
     """Get global conversation manager."""
     global _conversation_manager
     if _conversation_manager is None:

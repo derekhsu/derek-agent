@@ -6,7 +6,7 @@ from typing import Any, AsyncIterator, Callable
 from agno.agent import RunEvent
 from agno.utils.tokens import count_text_tokens
 
-from ..storage import Message, Session, SQLiteStorage, UsageMetrics
+from ..storage import BaseStorage, Message, Session, UsageMetrics, create_storage
 from .agent_manager import AgentManager, ConversationManager, get_agent_manager, get_conversation_manager, parse_model_string
 from .config import get_config, logger
 
@@ -48,7 +48,7 @@ class AgentRunner:
         self,
         agent_manager: AgentManager | None = None,
         conversation_manager: ConversationManager | None = None,
-        storage: SQLiteStorage | None = None,
+        storage: BaseStorage | None = None,
     ):
         """Initialize agent runner.
 
@@ -58,7 +58,7 @@ class AgentRunner:
             storage: Optional storage instance.
         """
         self.config = get_config()
-        self.storage = storage or SQLiteStorage(self.config.settings.storage.path)
+        self.storage = storage or create_storage(self.config.settings.storage)
         self.agent_manager = agent_manager or get_agent_manager()
         self.conversation_manager = conversation_manager or get_conversation_manager(self.storage)
 
