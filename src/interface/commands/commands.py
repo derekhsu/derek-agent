@@ -166,36 +166,97 @@ class ClearCommand(Command):
         return "對話記錄已清除"
 
 
+class HistoryCommand(Command):
+    """Show conversation history."""
+
+    name = "history"
+    description = "顯示對話歷史"
+    usage = "/history"
+    aliases = ["h", "hist"]
+
+    async def execute(self, args: list[str]) -> str:
+        """Execute history command."""
+        if self.app and hasattr(self.app, "action_history"):
+            self.app.action_history()
+            return ""  # Return empty as the screen will handle the UI
+        return "無法開啟對話歷史"
+
+
 class CompactCommand(Command):
     """Compact the conversation with optional focus."""
 
     name = "compact"
     description = "壓縮對話內容"
-    usage = "/compact [focus]"
+    usage = "/compact [auto|manual|threshold <n>|status]"
     aliases = ["c", "summary"]
 
     async def execute(self, args: list[str]) -> str:
         """Execute compact command."""
-        focus = args[0] if args else None
+        if not self.runner:
+            return "Runner 未初始化"
 
-        if self.runner:
-            try:
-                # Get conversation history
-                messages = await self.runner.get_conversation_history()
-                if not messages:
-                    return "沒有對話內容可壓縮"
+        try:
+            # Handle subcommands
+            if args:
+                subcommand = args[0].lower()
 
-                # TODO: Implement actual compaction logic
-                # For now, just return a summary
-                msg_count = len(messages)
-                if focus:
-                    return f"已壓縮對話（{msg_count} 則訊息），主題聚焦於: {focus}"
-                else:
-                    return f"已壓縮對話（{msg_count} 則訊息）"
-            except Exception as e:
-                return f"壓縮失敗: {e}"
+                if subcommand == "auto":
+                    await self.runner.update_compression_config(auto_trigger=True)
+                    return "✅ 已啟用自動壓縮提示（達到閾值時自動建議）"
 
-        return "Runner 未初始化"
+                elif subcommand == "manual":
+                    await self.runner.update_compression_config(auto_trigger=False)
+                    return "✅ 已設為手動模式（僅透過 /compact 觸發）"
+
+                elif subcommand == "threshold" and len(args) >= 2:
+                    try:
+                        percent = int(args[1])
+                        if 1 <= percent <= 100:
+                            await self.runner.update_compression_config(threshold_percent=percent)
+                            return f"✅ 已設定壓縮閾值為 {percent}%"
+                        else:
+                            return "❌ 閾值必須在 1-100 之間"
+                    except ValueError:
+                        return "❌ 請提供有效的數字（1-100）"
+
+                elif subcommand == "status":
+                    config = self.runner.get_compression_config()
+                    return (
+                        f"📊 壓縮設定狀態\n"
+                        f"- 啟用狀態: {'✅' if config['enabled'] else '❌'}\n"
+                        f"- 觸發模式: {'自動' if config['auto_trigger'] else '手動'}\n"
+                        f"- 閾值百分比: {config['threshold_percent']}%\n"
+                        f"- 摘要模型: {config['summary_model'] or '使用當前模型'}\n"
+                        f"- 摘要上限: {config['max_summary_tokens']} tokens"
+                    )
+
+                elif subcommand in ("on", "enable"):
+                    await self.runner.update_compression_config(enabled=True)
+                    return "✅ 已啟用對話壓縮功能"
+
+                elif subcommand in ("off", "disable"):
+                    await self.runner.update_compression_config(enabled=False)
+                    return "✅ 已停用對話壓縮功能"
+
+            # Default: execute compression
+            result = await self.runner.compress_conversation()
+
+            if result["success"]:
+                msg_count = result["message_count"]
+                return f"✅ 對話已壓縮（{msg_count} 則訊息已摘要為系統提示）"
+            else:
+                error = result.get("error", "未知錯誤")
+                return f"❌ 壓縮失敗: {error}"
+
+        except Exception as e:
+            return f"❌ 壓縮失敗: {e}"
+
+    def get_completions(self, partial: str) -> list[str]:
+        """Get command completions."""
+        subcommands = ["auto", "manual", "threshold", "status", "on", "off", "enable", "disable"]
+        if not partial:
+            return subcommands
+        return [cmd for cmd in subcommands if cmd.startswith(partial.lower())]
 
 
 def register_all_commands() -> None:
@@ -211,6 +272,7 @@ def register_all_commands() -> None:
     registry.register(AgentCommand)
     registry.register(HelpCommand)
     registry.register(ClearCommand)
+    registry.register(HistoryCommand)
     registry.register(CompactCommand)
     registry.register(MCPCommand)
     registry.register(SkillsCommand)

@@ -6,18 +6,33 @@ from textual.containers import ScrollableContainer, Vertical
 from textual.reactive import reactive
 from textual.screen import Screen
 from textual.widgets import Header, Label, Static
+from textual.binding import Binding
 
 from ...core.agent_runner import AgentRunner
 from ...core.config import get_config
 from ...storage import Message
 from ..widgets.chat_message import ChatMessage
 from ..widgets.input_bar import InputBar
+from .history_screen import HistoryScreen
 
 
 class ChatScreen(Screen):
     """Main chat screen."""
 
+    BINDINGS = [
+        Binding("ctrl+c", "compress", "壓縮對話", show=False),
+    ]
+
     DEFAULT_CSS = """
+    ChatScreen #compression-notice {
+        dock: top;
+        height: 1;
+        background: $warning-darken-2;
+        color: $text;
+        content-align: center middle;
+        text-style: bold;
+    }
+
     ChatScreen {
         layout: vertical;
     }
@@ -57,10 +72,15 @@ class ChatScreen(Screen):
         color: $text-muted;
         text-style: dim;
     }
+
+    ChatScreen #compression-notice.hidden {
+        display: none;
+    }
     """
 
     agent_name = reactive("未選擇")
     is_generating = reactive(False)
+    compression_suggested = reactive(False)
 
     def __init__(self, runner: AgentRunner):
         """Initialize chat screen.
@@ -72,11 +92,13 @@ class ChatScreen(Screen):
         self.runner = runner
         self._current_streaming_message: ChatMessage | None = None
         self._generation_task: asyncio.Task | None = None
+        self._compression_notice: Label | None = None
 
     def compose(self):
         """Compose the screen."""
         yield Header(show_clock=True)
         yield Label(id="status-bar")
+        yield Label(id="compression-notice", classes="hidden")
 
         with Vertical(id="chat-container"):
             chat_log = ScrollableContainer(id="chat-log")
@@ -98,6 +120,15 @@ class ChatScreen(Screen):
         """Watch for agent name changes."""
         self.update_status()
         self.run_worker(self.refresh_token_status())
+
+    def watch_compression_suggested(self, suggested: bool):
+        """Watch for compression suggestion changes."""
+        notice = self.query_one("#compression-notice", Label)
+        if suggested:
+            notice.remove_class("hidden")
+            notice.update("⚠ 對話內容已達上下文上限的 50%，建議壓縮以釋放空間 (Alt+C)")
+        else:
+            notice.add_class("hidden")
 
     @staticmethod
     def format_token_status(
@@ -133,6 +164,47 @@ class ChatScreen(Screen):
             self.format_token_status(context_tokens, cumulative_metrics)
         )
 
+        # Check if compression is needed
+        await self._check_compression_status(pending_message)
+
+    async def _check_compression_status(self, pending_message: str | None = None):
+        """Check if compression suggestion should be shown."""
+        try:
+            compression_status = await self.runner.check_compression_needed(pending_message)
+            if compression_status["enabled"] and compression_status["needed"]:
+                # Only suggest if auto_trigger is enabled
+                config = self.runner.get_compression_config()
+                if config["auto_trigger"]:
+                    self.compression_suggested = True
+                else:
+                    self.compression_suggested = False
+            else:
+                self.compression_suggested = False
+        except Exception:
+            self.compression_suggested = False
+
+    def action_compress(self):
+        """Action to compress conversation."""
+        self.run_worker(self._compress_conversation())
+
+    async def _compress_conversation(self):
+        """Perform conversation compression."""
+        try:
+            self.add_message("system", "🔄 正在壓縮對話內容...")
+            result = await self.runner.compress_conversation()
+
+            if result["success"]:
+                self.compression_suggested = False
+                msg_count = result["message_count"]
+                self.add_message("system", f"✅ 對話已壓縮（{msg_count} 則訊息已摘要）")
+                await self.refresh_token_status()
+            else:
+                error = result.get("error", "未知錯誤")
+                self.add_message("system", f"❌ 壓縮失敗: {error}")
+
+        except Exception as e:
+            self.add_message("system", f"❌ 壓縮時發生錯誤: {e}")
+
     async def _load_default_agent(self):
         """Load default agent on startup."""
         try:
@@ -152,7 +224,7 @@ class ChatScreen(Screen):
         except Exception as e:
             self.add_message("system", f"載入 Agent 時出錯: {e}")
 
-    def add_message(self, role: str, content: str, mcp_phase: str | None = None, source_type: str | None = None) -> ChatMessage:
+    def add_message(self, role: str, content: str, mcp_phase: str | None = None, source_type: str | None = None, message_type: str | None = None) -> ChatMessage:
         """Add a message to the chat log.
 
         Args:
@@ -160,6 +232,7 @@ class ChatScreen(Screen):
             content: Message content.
             mcp_phase: Optional MCP activity phase (start/success/error).
             source_type: Optional source type ("mcp" or "builtin").
+            message_type: Optional message type (message, summary, archived).
 
         Returns:
             ChatMessage widget.
@@ -171,7 +244,7 @@ class ChatScreen(Screen):
         for widget in empty_state:
             widget.remove()
 
-        message_widget = ChatMessage(role, content, mcp_phase=mcp_phase, source_type=source_type)
+        message_widget = ChatMessage(role, content, mcp_phase=mcp_phase, source_type=source_type, message_type=message_type)
         chat_log.mount(message_widget)
         chat_log.scroll_end(animate=False)
         return message_widget
@@ -335,8 +408,54 @@ class ChatScreen(Screen):
 
     def action_history(self):
         """Action to show conversation history."""
-        # TODO: Implement history screen
-        self.notify("對話歷史功能開發中...", severity="information")
+        self.run_worker(self._show_history())
+
+    async def _show_history(self):
+        """Show history screen and handle selection."""
+        agent_name = self.runner.get_current_agent_name() or "未選擇"
+        history_screen = HistoryScreen(self.runner, agent_name)
+
+        def on_dismiss(session):
+            if session:
+                self.run_worker(self._load_conversation(session))
+
+        self.app.push_screen(history_screen, on_dismiss)
+
+    async def _load_conversation(self, session):
+        """Load a conversation and restore messages.
+
+        Args:
+            session: Session object to load.
+        """
+        try:
+            # Load the conversation via runner
+            loaded_session = await self.runner.load_conversation(session.id)
+            if not loaded_session:
+                self.notify("載入對話失敗", severity="error")
+                return
+
+            # Clear current chat log
+            chat_log = self.query_one("#chat-log", ScrollableContainer)
+            await chat_log.remove_children()
+
+            # Update agent name display
+            self.agent_name = self.runner.get_current_agent_name() or "未選擇"
+
+            # Restore messages
+            for msg in loaded_session.messages:
+                if msg.role in ("user", "assistant"):
+                    self.add_message(msg.role, msg.content, message_type=msg.message_type)
+                elif msg.role == "system":
+                    self.add_message("system", msg.content, message_type=msg.message_type)
+
+            # Refresh token status
+            await self.refresh_token_status()
+
+            # Show confirmation
+            self.notify(f"已載入對話: {loaded_session.title or '未命名'}", severity="information")
+
+        except Exception as e:
+            self.notify(f"載入對話失敗: {e}", severity="error")
 
     def action_settings(self):
         """Action to open settings."""

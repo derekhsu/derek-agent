@@ -68,6 +68,22 @@ class _FakeConversationManager:
         self.session.add_message(message)
         return message
 
+    def should_generate_title(self, session: Session) -> bool:
+        """Check if title should be generated."""
+        if not session:
+            return False
+        if session.title != "新對話":
+            return False
+        user_assistant_count = sum(1 for m in session.messages if m.role in ("user", "assistant"))
+        return user_assistant_count >= 2
+
+    async def update_session_title(self, session_id: str, title: str) -> bool:
+        """Update session title."""
+        if session_id == self.session.id:
+            self.session.title = title
+            return True
+        return False
+
 
 @pytest.fixture
 def empty_session():

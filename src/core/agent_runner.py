@@ -7,7 +7,8 @@ from agno.agent import RunEvent
 from agno.utils.tokens import count_text_tokens
 
 from ..storage import BaseStorage, Message, Session, UsageMetrics, create_storage
-from .agent_manager import AgentManager, ConversationManager, get_agent_manager, get_conversation_manager, parse_model_string
+from .agent_manager import AgentManager, ConversationManager, get_agent_manager, get_conversation_manager, parse_model_string, create_model
+from .compression_manager import CompressionManager
 from .config import get_config, logger
 
 
@@ -322,7 +323,92 @@ class AgentRunner:
             self._current_session.id, "assistant", response_text, metrics=response_metrics
         )
 
+        # Generate title if needed (only on first exchange)
+        await self._maybe_generate_title(message, response_text)
+
         return response_text
+
+    async def _maybe_generate_title(self, user_message: str, assistant_response: str) -> None:
+        """Generate and update conversation title if needed.
+
+        Args:
+            user_message: The user's message.
+            assistant_response: The assistant's response.
+        """
+        if not self._current_session:
+            return
+
+        # Check if title generation is enabled
+        title_config = self.config.settings.title_generation
+        if not title_config.enabled:
+            return
+
+        # Refresh session to check current state
+        session = await self.conversation_manager.get_session(self._current_session.id)
+        if not session:
+            return
+
+        # Check if we should generate title
+        if not self.conversation_manager.should_generate_title(session):
+            return
+
+        try:
+            title = await self._generate_conversation_title(user_message, assistant_response)
+            if title:
+                await self.conversation_manager.update_session_title(session.id, title)
+        except Exception as e:
+            logger.debug(f"Failed to generate conversation title: {e}")
+
+    async def _generate_conversation_title(self, user_message: str, assistant_response: str) -> str | None:
+        """Generate a title for the conversation using LLM.
+
+        Args:
+            user_message: The user's first message.
+            assistant_response: The assistant's response.
+
+        Returns:
+            Generated title or None if failed.
+        """
+        title_config = self.config.settings.title_generation
+        max_length = title_config.max_length
+
+        # Build prompt for title generation
+        prompt = f"""根據以下對話內容，用 8-{max_length} 個字產生一個簡短、具描述性的繁體中文標題。
+只回傳標題文字，不要有任何其他說明。
+
+User: {user_message[:500]}
+Assistant: {assistant_response[:500]}
+
+標題："""
+
+        try:
+            # Use dedicated title model if configured, otherwise use current agent
+            if title_config.model:
+                provider, model_id = parse_model_string(title_config.model)
+                title_model = create_model(provider, model_id)
+                from agno.agent import Agent
+                temp_agent = Agent(model=title_model, markdown=False)
+                response = await temp_agent.arun(prompt)
+                title = getattr(response, "content", str(response)).strip()
+            else:
+                # Use current agent
+                agent_instance = self.agent_manager.get_agent(self._current_agent_id)
+                if not agent_instance:
+                    return None
+                response = await agent_instance.run(prompt)
+                title = getattr(response, "content", str(response)).strip()
+
+            # Clean up title
+            title = title.replace("標題：", "").replace("Title:", "").strip()
+            # Limit length
+            if len(title) > max_length:
+                title = title[:max_length].strip()
+
+            return title if title else None
+
+        except Exception as e:
+            logger.debug(f"Title generation error: {e}")
+            return None
 
     async def get_conversation_history(self) -> list[Message]:
         """Get current conversation history.
@@ -352,6 +438,162 @@ class AgentRunner:
             total += count_text_tokens(f"user: {pending_message}", model_id)
 
         return total
+
+    async def check_compression_needed(self, pending_message: str | None = None) -> dict[str, Any]:
+        """Check if conversation compression is needed.
+
+        Args:
+            pending_message: Optional pending message to include in calculation.
+
+        Returns:
+            Dict with compression status info:
+            - needed: bool - whether compression should be triggered
+            - current_tokens: int - current token count
+            - threshold_tokens: int - threshold for compression
+            - threshold_percent: int - configured threshold percentage
+            - context_window: int - model's context window size
+            - enabled: bool - whether compression is enabled in settings
+        """
+        result = {
+            "needed": False,
+            "current_tokens": 0,
+            "threshold_tokens": 0,
+            "threshold_percent": 50,
+            "context_window": 128000,
+            "enabled": False,
+        }
+
+        if not self._current_session or not self._current_agent_id:
+            return result
+
+        # Get compression config
+        compression_config = self.config.settings.context_compression
+        result["enabled"] = compression_config.enabled
+        result["threshold_percent"] = compression_config.threshold_percent
+
+        if not compression_config.enabled:
+            return result
+
+        # Get agent config for system prompt
+        agent_config = self.config.get_agent(self._current_agent_id)
+        system_prompt = agent_config.system_prompt if agent_config else ""
+
+        # Get model info
+        model_id = self._get_current_model_id()
+        provider, _ = parse_model_string(agent_config.model if agent_config else "openai:gpt-4o")
+
+        # Create compression manager
+        agent_instance = self.agent_manager.get_agent(self._current_agent_id)
+        compression_manager = CompressionManager(agent_instance)
+
+        # Get context window
+        result["context_window"] = compression_manager.get_context_window(model_id, provider)
+
+        # Refresh session
+        session = await self.conversation_manager.get_session(self._current_session.id)
+        if not session:
+            return result
+
+        # Check if compression needed
+        should_compress, current_tokens, threshold_tokens = compression_manager.should_compress(
+            session=session,
+            model_id=model_id,
+            system_prompt=system_prompt,
+            pending_message=pending_message,
+            threshold_percent=compression_config.threshold_percent,
+        )
+
+        result["needed"] = should_compress
+        result["current_tokens"] = current_tokens
+        result["threshold_tokens"] = threshold_tokens
+
+        return result
+
+    async def compress_conversation(self) -> dict[str, Any]:
+        """Compress current conversation by generating a summary.
+
+        Returns:
+            Dict with compression result:
+            - success: bool - whether compression succeeded
+            - summary: str - generated summary text
+            - metrics: UsageMetrics | None - token usage for summary generation
+            - message_count: int - number of messages compressed
+            - error: str | None - error message if failed
+        """
+        result = {
+            "success": False,
+            "summary": "",
+            "metrics": None,
+            "message_count": 0,
+            "error": None,
+        }
+
+        if not self._current_session or not self._current_agent_id:
+            result["error"] = "No active session"
+            return result
+
+        try:
+            # Get agent instance and config
+            agent_instance = self.agent_manager.get_agent(self._current_agent_id)
+            if not agent_instance:
+                result["error"] = "Agent not loaded"
+                return result
+
+            agent_config = self.config.get_agent(self._current_agent_id)
+            model_id = self._get_current_model_id()
+
+            # Get compression config
+            compression_config = self.config.settings.context_compression
+
+            # Refresh session
+            session = await self.conversation_manager.get_session(self._current_session.id)
+            if not session or not session.messages:
+                result["error"] = "No messages to compress"
+                return result
+
+            result["message_count"] = len(session.messages)
+
+            # Create compression manager and compress
+            compression_manager = CompressionManager(agent_instance)
+            summary_text, metrics = await compression_manager.compress_session(
+                session=session,
+                model_id=model_id,
+                summary_model=compression_config.summary_model,
+                max_summary_tokens=compression_config.max_summary_tokens,
+            )
+
+            # Add summary message to session
+            summary_content = f"【對話摘要】\n{summary_text}\n\n以上是你與使用者之前的對話摘要（共 {len(session.messages)} 則訊息）。請基於此摘要繼續協助使用者。"
+            await self.conversation_manager.add_message(
+                self._current_session.id, "system", summary_content, metrics=metrics
+            )
+
+            result["success"] = True
+            result["summary"] = summary_text
+            result["metrics"] = metrics
+
+            logger.info(f"Conversation compressed: {len(session.messages)} messages summarized")
+
+        except Exception as e:
+            result["error"] = str(e)
+            logger.error(f"Failed to compress conversation: {e}")
+
+        return result
+
+    def get_compression_config(self) -> dict[str, Any]:
+        """Get current compression configuration.
+
+        Returns:
+            Dict with compression settings.
+        """
+        config = self.config.settings.context_compression
+        return {
+            "enabled": config.enabled,
+            "auto_trigger": config.auto_trigger,
+            "threshold_percent": config.threshold_percent,
+            "summary_model": config.summary_model,
+            "max_summary_tokens": config.max_summary_tokens,
+        }
 
     async def get_session_metrics(self) -> "UsageMetrics | None":
         """Get total token usage metrics for current session.
@@ -462,6 +704,40 @@ class AgentRunner:
         if not agent_instance:
             return None
         return agent_instance.get_memories()
+
+    async def update_compression_config(
+        self,
+        enabled: bool | None = None,
+        auto_trigger: bool | None = None,
+        threshold_percent: int | None = None,
+        summary_model: str | None = None,
+    ) -> dict[str, Any]:
+        """Update compression configuration.
+
+        Args:
+            enabled: Whether to enable compression.
+            auto_trigger: Whether to auto-trigger compression.
+            threshold_percent: Threshold percentage (1-100).
+            summary_model: Model for summarization.
+
+        Returns:
+            Updated configuration dict.
+        """
+        config = self.config.settings.context_compression
+
+        if enabled is not None:
+            config.enabled = enabled
+        if auto_trigger is not None:
+            config.auto_trigger = auto_trigger
+        if threshold_percent is not None:
+            config.threshold_percent = max(1, min(100, threshold_percent))
+        if summary_model is not None:
+            config.summary_model = summary_model
+
+        # Save settings
+        self.config._save_settings(self.config.settings)
+
+        return self.get_compression_config()
 
 
 # Global runner instance

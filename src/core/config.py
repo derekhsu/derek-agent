@@ -99,6 +99,24 @@ class UIConfig(BaseModel):
     mcp_activity_display_mode: str = "inline"
 
 
+class TitleGenerationConfig(BaseModel):
+    """Title generation configuration."""
+
+    enabled: bool = True
+    model: str | None = None  # e.g., "openai:gpt-4o-mini", None uses current agent model
+    max_length: int = 20  # Max characters for generated title
+
+
+class ContextCompressionConfig(BaseModel):
+    """Context compression configuration."""
+
+    enabled: bool = True              # Enable automatic context compression
+    auto_trigger: bool = True         # Auto-trigger or manual only
+    threshold_percent: int = 50       # Threshold percentage (1-100)
+    summary_model: str | None = None  # Model for summarization, None uses current agent model
+    max_summary_tokens: int = 500     # Max tokens for summary
+
+
 class Settings(BaseModel):
     """Global settings."""
 
@@ -107,6 +125,8 @@ class Settings(BaseModel):
     storage: StorageConfig = Field(default_factory=StorageConfig)
     ui: UIConfig = Field(default_factory=UIConfig)
     web_search: WebSearchConfig = Field(default_factory=WebSearchConfig)
+    title_generation: TitleGenerationConfig = Field(default_factory=TitleGenerationConfig)
+    context_compression: ContextCompressionConfig = Field(default_factory=ContextCompressionConfig)
 
 
 class Config:

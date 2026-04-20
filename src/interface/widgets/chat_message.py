@@ -83,9 +83,31 @@ class ChatMessage(Vertical):
     ChatMessage.mcp-activity.error .message-content {
         color: $error;
     }
+
+    ChatMessage.summary {
+        background: $surface-darken-1;
+        border: solid $warning-darken-2;
+        padding: 1;
+        margin: 1 0;
+    }
+
+    ChatMessage.summary .sender-label {
+        color: $warning;
+        text-style: bold;
+    }
+
+    ChatMessage.summary .message-content {
+        color: $text;
+        text-style: none;
+    }
+
+    ChatMessage.summary .summary-header {
+        color: $warning;
+        text-style: bold;
+    }
     """
 
-    def __init__(self, role: str, content: str, timestamp: str | None = None, mcp_phase: str | None = None, source_type: str | None = None):
+    def __init__(self, role: str, content: str, timestamp: str | None = None, mcp_phase: str | None = None, source_type: str | None = None, message_type: str | None = None):
         """Initialize chat message.
 
         Args:
@@ -94,6 +116,7 @@ class ChatMessage(Vertical):
             timestamp: Optional timestamp string.
             mcp_phase: Optional MCP activity phase (start/success/error).
             source_type: Optional source type ("mcp" or "builtin").
+            message_type: Optional message type (message, summary, archived).
         """
         super().__init__()
         self.role = role
@@ -101,7 +124,9 @@ class ChatMessage(Vertical):
         self.timestamp = timestamp
         self.mcp_phase = mcp_phase
         self.source_type = source_type
+        self.message_type = message_type
         self._first_update = True
+        self._is_summary = "【對話摘要】" in content
 
     def compose(self):
         """Compose the widget."""
@@ -125,6 +150,10 @@ class ChatMessage(Vertical):
             sender = "你"
         elif self.role == "assistant":
             sender = "AI"
+        elif self._is_summary:
+            # Special handling for summary messages
+            self.add_class("summary")
+            sender = "📋 對話摘要"
         else:
             sender = "系統"
 

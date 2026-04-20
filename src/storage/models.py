@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -17,6 +17,7 @@ class SessionModel(Base):
     created_at: Mapped[str] = mapped_column(String, nullable=False)
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
     metadata_json: Mapped[str | None] = mapped_column("metadata", Text)
+    is_compressed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=True)
     messages: Mapped[list[MessageModel]] = relationship(
         back_populates="session",
         cascade="all, delete-orphan",
@@ -37,4 +38,5 @@ class MessageModel(Base):
     timestamp: Mapped[str] = mapped_column(String, nullable=False)
     metadata_json: Mapped[str | None] = mapped_column("metadata", Text)
     metrics_json: Mapped[str | None] = mapped_column("metrics", Text)
+    message_type: Mapped[str] = mapped_column(String, default="message", nullable=True)
     session: Mapped[SessionModel] = relationship(back_populates="messages")

@@ -129,6 +129,51 @@ MINIMAX_MODELS: list[ModelInfo] = [
     ModelInfo(id="MiniMax-VL-01", name="MiniMax VL-01 (Vision)", context_window=204800, reasoning=False),
 ]
 
+# Built-in model context window sizes (for built-in providers)
+BUILTIN_MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+    # OpenAI models
+    "gpt-4o": 128000,
+    "gpt-4o-mini": 128000,
+    "gpt-4-turbo": 128000,
+    "gpt-4": 8192,
+    "gpt-3.5-turbo": 16385,
+    "o1": 128000,
+    "o3-mini": 200000,
+    # Anthropic models
+    "claude-3-opus-20240229": 200000,
+    "claude-3-5-sonnet-20241022": 200000,
+    "claude-3-5-sonnet-20240620": 200000,
+    "claude-3-5-haiku-20241022": 200000,
+    "claude-3-haiku-20240307": 200000,
+    "claude-3-7-sonnet-20250219": 200000,
+}
+
+
+def get_model_context_window(model_id: str, provider: str | None = None) -> int:
+    """Get context window size for a model.
+
+    Args:
+        model_id: Model identifier.
+        provider: Optional provider name.
+
+    Returns:
+        Context window size in tokens. Defaults to 128000 if unknown.
+    """
+    # Check built-in models first
+    if model_id in BUILTIN_MODEL_CONTEXT_WINDOWS:
+        return BUILTIN_MODEL_CONTEXT_WINDOWS[model_id]
+
+    # Check custom providers.yaml
+    if provider and provider not in ("openai", "anthropic", "claude"):
+        config = load_providers()
+        if provider in config.providers:
+            for model in config.providers[provider].models:
+                if model.id == model_id:
+                    return model.context_window
+
+    # Default fallback
+    return 128000
+
 
 def create_model_from_provider(provider_name: str, model_id: str) -> Any:
     """Instantiate an Agno model from providers.yaml config.

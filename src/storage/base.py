@@ -83,12 +83,14 @@ class Message:
         timestamp: datetime | None = None,
         metadata: dict[str, Any] | None = None,
         metrics: UsageMetrics | None = None,
+        message_type: str = "message",  # message, summary, archived
     ):
         self.role = role
         self.content = content
         self.timestamp = timestamp or datetime.now()
         self.metadata = metadata or {}
         self.metrics = metrics
+        self.message_type = message_type
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
@@ -97,6 +99,7 @@ class Message:
             "content": self.content,
             "timestamp": self.timestamp.isoformat(),
             "metadata": self.metadata,
+            "message_type": self.message_type,
         }
         if self.metrics:
             result["metrics"] = self.metrics.to_dict()
@@ -112,6 +115,7 @@ class Message:
             timestamp=datetime.fromisoformat(data["timestamp"]),
             metadata=data.get("metadata", {}),
             metrics=UsageMetrics.from_dict(metrics_data) if metrics_data else None,
+            message_type=data.get("message_type", "message"),
         )
 
 
@@ -127,6 +131,7 @@ class Session:
         updated_at: datetime | None = None,
         messages: list[Message] | None = None,
         metadata: dict[str, Any] | None = None,
+        is_compressed: bool = False,
     ):
         self.id = id
         self.agent_id = agent_id
@@ -135,6 +140,7 @@ class Session:
         self.updated_at = updated_at or datetime.now()
         self.messages = messages or []
         self.metadata = metadata or {}
+        self.is_compressed = is_compressed
 
     def add_message(self, message: Message) -> None:
         """Add a message to the session."""
@@ -159,6 +165,7 @@ class Session:
             "updated_at": self.updated_at.isoformat(),
             "messages": [m.to_dict() for m in self.messages],
             "metadata": self.metadata,
+            "is_compressed": self.is_compressed,
         }
 
     @classmethod
@@ -172,6 +179,7 @@ class Session:
             updated_at=datetime.fromisoformat(data["updated_at"]),
             messages=[Message.from_dict(m) for m in data.get("messages", [])],
             metadata=data.get("metadata", {}),
+            is_compressed=data.get("is_compressed", False),
         )
 
 

@@ -440,6 +440,42 @@ class ConversationManager:
         """
         return await self.storage.delete_session(session_id)
 
+    async def update_session_title(self, session_id: str, title: str) -> bool:
+        """Update session title.
+
+        Args:
+            session_id: Session ID.
+            title: New title.
+
+        Returns:
+            True if updated.
+        """
+        session = await self.storage.get_session(session_id)
+        if not session:
+            return False
+        session.title = title
+        await self.storage.update_session(session)
+        logger.info(f"Updated session title: {session_id} -> '{title}'")
+        return True
+
+    def should_generate_title(self, session: Session) -> bool:
+        """Check if title should be generated for this session.
+
+        Args:
+            session: Session to check.
+
+        Returns:
+            True if title should be generated (title is "新對話" and has messages).
+        """
+        if not session:
+            return False
+        # Only generate if title is the default "新對話"
+        if session.title != "新對話":
+            return False
+        # Only generate on first user-assistant exchange (2+ messages)
+        user_assistant_count = sum(1 for m in session.messages if m.role in ("user", "assistant"))
+        return user_assistant_count >= 2
+
 
 # Global instances
 _agent_manager: AgentManager | None = None

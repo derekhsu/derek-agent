@@ -32,6 +32,7 @@ class SQLAlchemyStorage(BaseStorage):
                     created_at=session.created_at.isoformat(),
                     updated_at=session.updated_at.isoformat(),
                     metadata_json=json.dumps(session.metadata),
+                    is_compressed=session.is_compressed,
                 )
             )
             db.commit()
@@ -70,6 +71,7 @@ class SQLAlchemyStorage(BaseStorage):
             row.title = session.title
             row.updated_at = session.updated_at.isoformat()
             row.metadata_json = json.dumps(session.metadata)
+            row.is_compressed = session.is_compressed
             db.commit()
         return session
 
@@ -89,6 +91,7 @@ class SQLAlchemyStorage(BaseStorage):
                     timestamp=message.timestamp.isoformat(),
                     metadata_json=json.dumps(message.metadata),
                     metrics_json=json.dumps(message.metrics.to_dict()) if message.metrics else None,
+                    message_type=message.message_type,
                 )
             )
             result = db.execute(select(SessionModel).where(SessionModel.id == session_id))
@@ -122,6 +125,7 @@ class SQLAlchemyStorage(BaseStorage):
             updated_at=datetime.fromisoformat(row.updated_at),
             messages=messages,
             metadata=json.loads(row.metadata_json) if row.metadata_json else {},
+            is_compressed=row.is_compressed if row.is_compressed is not None else False,
         )
 
     def _to_message(self, row: MessageModel) -> Message:
@@ -134,4 +138,5 @@ class SQLAlchemyStorage(BaseStorage):
             timestamp=datetime.fromisoformat(row.timestamp),
             metadata=json.loads(row.metadata_json) if row.metadata_json else {},
             metrics=metrics,
+            message_type=row.message_type if row.message_type else "message",
         )
