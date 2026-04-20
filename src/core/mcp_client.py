@@ -1,6 +1,7 @@
 """MCP Client manager for Derek Agent Runner."""
 
 import asyncio
+import threading
 from typing import Any
 
 from agno.tools.mcp import MCPTools
@@ -75,6 +76,7 @@ class MCPClientManager:
         self._connections: dict[str, MCPConnection] = {}
         self._disabled_servers: set[str] = set()
         self._server_configs: dict[str, MCPConfig] = {}
+        self._tool_prefix_map: dict[str, str] = {}  # prefix -> server_name mapping
 
     async def add_server(self, config: MCPConfig) -> MCPConnection:
         """Add and connect to an MCP server.
@@ -88,6 +90,11 @@ class MCPClientManager:
         connection = MCPConnection(config)
         self._connections[config.name] = connection
         self._server_configs[config.name] = config
+        
+        # Update prefix mapping for O(1) lookup
+        prefix = f"{config.name}_"
+        self._tool_prefix_map[prefix] = config.name
+        
         await connection.connect()
         logger.info(f"Connected to MCP server: {config.name}")
         return connection
@@ -105,6 +112,11 @@ class MCPClientManager:
         if connection:
             await connection.disconnect()
             del self._connections[name]
+            
+            # Clean up prefix mapping
+            prefix = f"{name}_"
+            self._tool_prefix_map.pop(prefix, None)
+            
             logger.info(f"Disconnected from MCP server: {name}")
             return True
         return False
@@ -123,10 +135,20 @@ class MCPClientManager:
     def resolve_tool_name(self, tool_name: str | None) -> tuple[str | None, str | None]:
         if not tool_name:
             return None, None
-        for server_name in self._connections:
-            prefix = f"{server_name}_"
-            if tool_name.startswith(prefix):
-                return server_name, tool_name[len(prefix):]
+        
+        # O(1) lookup: find the longest matching prefix
+        # This is more efficient than iterating through all prefixes
+        longest_match_len = 0
+        matched_server = None
+        
+        for prefix, server_name in self._tool_prefix_map.items():
+            if tool_name.startswith(prefix) and len(prefix) > longest_match_len:
+                longest_match_len = len(prefix)
+                matched_server = server_name
+        
+        if matched_server:
+            return matched_server, tool_name[longest_match_len:]
+        
         return None, tool_name
 
     def is_mcp_tool_name(self, tool_name: str | None) -> bool:
@@ -176,6 +198,7 @@ class MCPClientManager:
             except Exception as e:
                 logger.warning(f"Error disconnecting from {name}: {e}")
         self._connections.clear()
+        self._tool_prefix_map.clear()
 
     def list_servers(self) -> list[str]:
         """List all connected server names.
@@ -230,19 +253,24 @@ class MCPClientManager:
         return status
 
 
-# Global manager instance
+# Global manager instance with thread-safe lock
 _manager: MCPClientManager | None = None
+_manager_lock = threading.Lock()
 
 
 def get_mcp_manager() -> MCPClientManager:
-    """Get global MCP client manager."""
+    """Get global MCP client manager (thread-safe)."""
     global _manager
     if _manager is None:
-        _manager = MCPClientManager()
+        with _manager_lock:
+            # Double-checked locking pattern
+            if _manager is None:
+                _manager = MCPClientManager()
     return _manager
 
 
 def reset_mcp_manager() -> None:
     """Reset global MCP client manager."""
     global _manager
-    _manager = None
+    with _manager_lock:
+        _manager = None

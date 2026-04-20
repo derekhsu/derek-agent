@@ -1,6 +1,7 @@
 """Agent runner for Derek Agent Runner - main orchestration."""
 
 import asyncio
+import threading
 from typing import Any, AsyncIterator, Callable
 
 from agno.agent import RunEvent
@@ -36,11 +37,11 @@ class AgentRunner:
     def _get_current_model_id(self) -> str:
         """Get current model id for token estimation."""
         if not self._current_agent_id:
-            return "gpt-4o"
+            return "openai:gpt-4o"
 
         agent_config = self.config.get_agent(self._current_agent_id)
         if not agent_config:
-            return "gpt-4o"
+            return "openai:gpt-4o"
 
         _, model_id = parse_model_string(agent_config.model)
         return model_id
@@ -278,7 +279,7 @@ class AgentRunner:
         if stream_callback:
             # Streaming mode
             response_text = ""
-            async for chunk in agent_instance.run_stream(messages, stream_events=True):
+            async for chunk in agent_instance.run_stream(messages):
                 event_name = getattr(chunk, "event", None)
                 if event_name == RunEvent.run_content.value:
                     content = getattr(chunk, "content", None)
@@ -740,20 +741,25 @@ Assistant: {assistant_response[:500]}
         return self.get_compression_config()
 
 
-# Global runner instance
+# Global runner instance with thread-safe lock
 _runner: AgentRunner | None = None
+_runner_lock = threading.Lock()
 
 
 async def get_runner() -> AgentRunner:
-    """Get global agent runner (initialized)."""
+    """Get global agent runner (initialized, thread-safe)."""
     global _runner
     if _runner is None:
-        _runner = AgentRunner()
-        await _runner.initialize()
+        with _runner_lock:
+            # Double-checked locking pattern
+            if _runner is None:
+                _runner = AgentRunner()
+                await _runner.initialize()
     return _runner
 
 
 def reset_runner() -> None:
     """Reset global runner."""
     global _runner
-    _runner = None
+    with _runner_lock:
+        _runner = None

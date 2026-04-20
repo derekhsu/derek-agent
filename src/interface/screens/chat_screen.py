@@ -338,17 +338,25 @@ class ChatScreen(Screen):
             input_bar.set_generating(True)
             self._current_streaming_message = None
 
+            # Show "思考中..." message first
+            from ..widgets.chat_message import THINKING_PLACEHOLDER
+            self._current_streaming_message = self.add_message("assistant", THINKING_PLACEHOLDER)
+
             # Stream response
             full_content = ""
 
             def on_chunk(chunk: str):
                 nonlocal full_content
                 full_content += chunk
-                if self._current_streaming_message is None:
-                    self._current_streaming_message = self.add_message("assistant", chunk)
+                if self._current_streaming_message is not None:
+                    # Replace "思考中..." with actual content on first chunk
+                    if self._current_streaming_message.content == THINKING_PLACEHOLDER:
+                        self._current_streaming_message.update_content(chunk)
+                    else:
+                        current_content = self._current_streaming_message.content + chunk
+                        self._current_streaming_message.update_content(current_content)
                 else:
-                    current_content = self._current_streaming_message.content + chunk
-                    self._current_streaming_message.update_content(current_content)
+                    self._current_streaming_message = self.add_message("assistant", chunk)
                 chat_log = self.query_one("#chat-log", ScrollableContainer)
                 chat_log.scroll_end(animate=False)
 

@@ -11,6 +11,7 @@
 - **TUI 介面**：現代化的終端介面（使用 Textual）
 - **本地儲存**：使用 SQLite 儲存對話歷史，無需外部資料庫
 - **設定檔優先**：所有設定使用 YAML 檔案管理
+- **整合 Logging**：使用 Agno 內建的 Rich 彩色日誌系統，與 Agent 輸出風格統一
 
 ## 專案結構
 
@@ -134,6 +135,16 @@ web_search:
   provider: duckduckgo        # tavily | duckduckgo | websearch
   api_key: null               # Tavily 需要填入或使用 ${TAVILY_API_KEY}
   backend: null               # websearch provider 的後端選項
+logging:
+  level: info                 # debug | info | warning | error
+  console:
+    enabled: true             # 啟用 console 輸出
+    color: true               # Rich 彩色輸出
+  file:
+    enabled: false            # 啟用檔案記錄
+    path: ~/.derek-agent/logs/derek-agent.log  # 預設路徑
+    max_bytes: 10485760       # 10MB rotation 大小
+    backup_count: 5           # 保留備份數量
 ```
 
 ### 支援的搜尋 Provider

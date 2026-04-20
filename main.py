@@ -54,6 +54,10 @@ def main():
 
     # Default: launch TUI
     try:
+        # Initialize logging from config
+        from src.core.config import get_config, setup_logging
+        setup_logging(get_config().settings.logging)
+
         from src.interface import run_app
         run_app()
     except KeyboardInterrupt:

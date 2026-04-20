@@ -1,5 +1,6 @@
 """Agent manager for Derek Agent Runner."""
 
+import threading
 import uuid
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,10 @@ from ..tools.web_search import create_search_tool
 from ..tools.shell import create_shell_tool
 from ..tools.file import create_file_tool
 from ..tools.crawler import create_crawler_tool
+from ..tools.python import create_python_tool
+from ..tools.reasoning import create_reasoning_tool
+from ..tools.calculator import create_calculator_tool
+from ..tools.grep import create_grep_tool
 from .config import AgentConfig, get_config, logger
 from .mcp_client import MCPClientManager, get_mcp_manager
 from .skills import build_agent_skills
@@ -72,7 +77,7 @@ class AgentInstance:
         # Ensure user_id is passed for memory persistence
         if "user_id" not in kwargs:
             kwargs["user_id"] = self.user_id
-        return self.agent.arun(messages, stream=True, **kwargs)
+        return self.agent.arun(messages, stream=True, stream_events=True, **kwargs)
 
     async def cleanup(self) -> None:
         """Cleanup resources."""
@@ -260,6 +265,30 @@ class AgentManager:
             tools.append(crawler_tool)
             logger.info(f"Enabled crawler tool for agent: {config.id}")
 
+        # Setup Python tool
+        python_tool = create_python_tool(config.python, working_dir=config.working_dir)
+        if python_tool is not None:
+            tools.append(python_tool)
+            logger.info(f"Enabled Python tool for agent: {config.id}")
+
+        # Setup reasoning tool
+        reasoning_tool = create_reasoning_tool(config.reasoning)
+        if reasoning_tool is not None:
+            tools.append(reasoning_tool)
+            logger.info(f"Enabled reasoning tool for agent: {config.id}")
+
+        # Setup calculator tool
+        calculator_tool = create_calculator_tool(config.calculator)
+        if calculator_tool is not None:
+            tools.append(calculator_tool)
+            logger.info(f"Enabled calculator tool for agent: {config.id}")
+
+        # Setup grep tool
+        grep_tool = create_grep_tool(config.grep, working_dir=config.working_dir)
+        if grep_tool is not None:
+            tools.append(grep_tool)
+            logger.info(f"Enabled grep tool for agent: {config.id}")
+
         # Setup Agno memory database
         db_path = resolve_agno_sqlite_db_path()
         agno_db = SqliteDb(db_file=db_path) if db_path else None
@@ -277,7 +306,7 @@ class AgentManager:
             db=agno_db,
             enable_agentic_memory=True,
             add_datetime_to_context=config.add_datetime_to_context,
-            timezone_identifier="Asia/Taipei",
+            timezone_identifier=config.timezone,
         )
 
         instance = AgentInstance(
@@ -477,24 +506,33 @@ class ConversationManager:
         return user_assistant_count >= 2
 
 
-# Global instances
+# Global instances with thread-safe locks
 _agent_manager: AgentManager | None = None
+_agent_manager_lock = threading.Lock()
+
 _conversation_manager: ConversationManager | None = None
+_conversation_manager_lock = threading.Lock()
 
 
 def get_agent_manager() -> AgentManager:
-    """Get global agent manager."""
+    """Get global agent manager (thread-safe)."""
     global _agent_manager
     if _agent_manager is None:
-        _agent_manager = AgentManager()
+        with _agent_manager_lock:
+            # Double-checked locking pattern
+            if _agent_manager is None:
+                _agent_manager = AgentManager()
     return _agent_manager
 
 
 def get_conversation_manager(storage: BaseStorage | None = None) -> ConversationManager:
-    """Get global conversation manager."""
+    """Get global conversation manager (thread-safe)."""
     global _conversation_manager
     if _conversation_manager is None:
-        if storage is None:
-            raise ValueError("Storage required for conversation manager")
-        _conversation_manager = ConversationManager(storage)
+        with _conversation_manager_lock:
+            # Double-checked locking pattern
+            if _conversation_manager is None:
+                if storage is None:
+                    raise ValueError("Storage required for conversation manager")
+                _conversation_manager = ConversationManager(storage)
     return _conversation_manager

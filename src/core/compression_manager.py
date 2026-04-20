@@ -1,8 +1,9 @@
 """Context compression manager for Derek Agent Runner."""
 
-import logging
+import threading
 from typing import TYPE_CHECKING
 
+from agno.utils.log import logger
 from agno.utils.tokens import count_text_tokens
 
 from ..storage import Message, Session, UsageMetrics
@@ -10,8 +11,6 @@ from .providers import get_model_context_window
 
 if TYPE_CHECKING:
     from .agent_manager import AgentInstance
-
-logger = logging.getLogger(__name__)
 
 
 # Summary prompt template in Traditional Chinese
@@ -38,6 +37,25 @@ class CompressionManager:
             agent_instance: Optional agent instance for running compression.
         """
         self.agent_instance = agent_instance
+        self._lock = threading.Lock()
+
+    def set_agent_instance(self, agent_instance: "AgentInstance") -> None:
+        """Set the agent instance (thread-safe).
+        
+        Args:
+            agent_instance: The agent instance to use for compression.
+        """
+        with self._lock:
+            self.agent_instance = agent_instance
+
+    def get_agent_instance(self) -> "AgentInstance | None":
+        """Get the agent instance (thread-safe).
+        
+        Returns:
+            The current agent instance or None.
+        """
+        with self._lock:
+            return self.agent_instance
 
     def get_context_window(self, model_id: str, provider: str | None = None) -> int:
         """Get context window size for a model.
@@ -140,7 +158,11 @@ class CompressionManager:
         Returns:
             Tuple of (summary_text, metrics).
         """
-        if not self.agent_instance:
+        # Thread-safe access to agent instance
+        with self._lock:
+            agent_instance = self.agent_instance
+            
+        if not agent_instance:
             raise RuntimeError("Agent instance required for compression")
 
         # Build conversation text
@@ -176,7 +198,7 @@ class CompressionManager:
                 response = await temp_agent.arun(summary_prompt)
             else:
                 # Use current agent for summarization
-                response = await self.agent_instance.run(summary_prompt)
+                response = await agent_instance.run(summary_prompt)
 
             summary_text = getattr(response, "content", str(response))
 

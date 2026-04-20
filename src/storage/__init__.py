@@ -1,6 +1,7 @@
 """Storage module for Derek Agent Runner."""
 
 from ..core.config import StorageConfig
+from .async_sqlalchemy_storage import AsyncSQLAlchemyStorage
 from .base import BaseStorage, Message, Session, UsageMetrics
 from .sqlalchemy_storage import SQLAlchemyStorage
 from .sqlite import SQLiteStorage

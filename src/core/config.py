@@ -2,13 +2,17 @@
 
 import logging
 import os
+import threading
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
 import yaml
+from agno.utils.log import logger as agno_logger
 from pydantic import BaseModel, Field
 
-logger = logging.getLogger(__name__)
+# Re-export Agno logger for backward compatibility
+logger = agno_logger
 
 
 class WebSearchConfig(BaseModel):
@@ -50,6 +54,35 @@ class AgentCrawlerConfig(BaseModel):
     max_urls: int = 10  # Max URLs to crawl per request
 
 
+class AgentPythonConfig(BaseModel):
+    """Per-agent Python tool overrides."""
+
+    enabled: bool = True
+    base_dir: str | None = None
+    allow_package_installation: bool = True
+
+
+class AgentReasoningConfig(BaseModel):
+    """Per-agent reasoning tool overrides."""
+
+    enabled: bool = True
+
+
+class AgentCalculatorConfig(BaseModel):
+    """Per-agent calculator tool overrides."""
+
+    enabled: bool = True
+
+
+class AgentGrepConfig(BaseModel):
+    """Per-agent grep tool overrides."""
+
+    enabled: bool = True
+    base_dir: str | None = None
+    max_results: int = 250
+    timeout_seconds: int = 20
+
+
 class MCPConfig(BaseModel):
     """MCP Server configuration."""
 
@@ -78,8 +111,13 @@ class AgentConfig(BaseModel):
     shell: AgentShellConfig = Field(default_factory=AgentShellConfig)
     file: AgentFileConfig = Field(default_factory=AgentFileConfig)
     crawler: AgentCrawlerConfig = Field(default_factory=AgentCrawlerConfig)
+    python: AgentPythonConfig = Field(default_factory=AgentPythonConfig)
+    reasoning: AgentReasoningConfig = Field(default_factory=AgentReasoningConfig)
+    calculator: AgentCalculatorConfig = Field(default_factory=AgentCalculatorConfig)
+    grep: AgentGrepConfig = Field(default_factory=AgentGrepConfig)
     working_dir: str | None = None
     add_datetime_to_context: bool = True
+    timezone: str = "Asia/Taipei"
 
 
 class StorageConfig(BaseModel):
@@ -117,6 +155,40 @@ class ContextCompressionConfig(BaseModel):
     max_summary_tokens: int = 500     # Max tokens for summary
 
 
+class ConsoleLoggingConfig(BaseModel):
+    """Console logging configuration."""
+
+    enabled: bool = True
+    color: bool = True               # Use Rich colored output
+
+
+class FileLoggingConfig(BaseModel):
+    """File logging configuration."""
+
+    enabled: bool = False
+    path: str | None = None          # Log file path, None uses default
+    max_bytes: int = 10_485_760      # 10MB rotation size
+    backup_count: int = 5            # Number of backup files to keep
+
+
+class LoggingConfig(BaseModel):
+    """Logging configuration."""
+
+    level: str = "info"              # debug | info | warning | error
+    console: ConsoleLoggingConfig = Field(default_factory=ConsoleLoggingConfig)
+    file: FileLoggingConfig = Field(default_factory=FileLoggingConfig)
+
+    def get_level(self) -> int:
+        """Get logging level as int."""
+        levels = {
+            "debug": logging.DEBUG,
+            "info": logging.INFO,
+            "warning": logging.WARNING,
+            "error": logging.ERROR,
+        }
+        return levels.get(self.level.lower(), logging.INFO)
+
+
 class Settings(BaseModel):
     """Global settings."""
 
@@ -127,6 +199,7 @@ class Settings(BaseModel):
     web_search: WebSearchConfig = Field(default_factory=WebSearchConfig)
     title_generation: TitleGenerationConfig = Field(default_factory=TitleGenerationConfig)
     context_compression: ContextCompressionConfig = Field(default_factory=ContextCompressionConfig)
+    logging: LoggingConfig = Field(default_factory=LoggingConfig)
 
 
 class Config:
@@ -195,7 +268,7 @@ class Config:
                 data = yaml.safe_load(f) or {}
             return Settings(**data)
         except Exception as e:
-            print(f"Warning: Failed to load settings: {e}. Using defaults.")
+            logger.warning(f"Failed to load settings: {e}. Using defaults.")
             default_storage = StorageConfig(
                 type="sqlite",
                 path=str(self.data_dir / "derek-agent.db")
@@ -223,7 +296,7 @@ class Config:
             agents = self._apply_skill_inheritance(agents)
             return self._apply_mcp_inheritance(agents)
         except Exception as e:
-            print(f"Warning: Failed to load agents: {e}. Using defaults.")
+            logger.warning(f"Failed to load agents: {e}. Using defaults.")
             return self._create_default_agents()
 
     def _apply_skill_inheritance(self, agents: list[AgentConfig]) -> list[AgentConfig]:
@@ -342,20 +415,90 @@ class Config:
         return False
 
 
-# Global config instance
+# Global config instance with thread-safe lock
 _config: Config | None = None
+_config_lock = threading.Lock()
 
 
 def get_config(config_dir: Path | None = None) -> Config:
-    """Get global config instance."""
+    """Get global config instance (thread-safe)."""
     global _config
     if _config is None or config_dir is not None:
-        _config = Config(config_dir)
+        with _config_lock:
+            # Double-checked locking pattern
+            if _config is None or config_dir is not None:
+                _config = Config(config_dir)
     return _config
 
 
 def reload_config() -> None:
     """Reload global config."""
     global _config
-    if _config:
-        _config.reload()
+    with _config_lock:
+        if _config:
+            _config.reload()
+
+
+def setup_logging(config: LoggingConfig | None = None, config_dir: Path | None = None) -> None:
+    """Setup logging based on configuration.
+
+    Configures both console (RichHandler) and file (RotatingFileHandler) logging
+    based on the provided settings.
+
+    Args:
+        config: Logging configuration. If None, uses default from get_config().
+        config_dir: Configuration directory for default log path. If None, uses get_config().config_dir.
+    """
+    if config is None:
+        config = get_config().settings.logging
+
+    if config_dir is None:
+        config_dir = get_config().config_dir
+
+    # Get the Agno logger
+    from agno.utils.log import LOGGER_NAME
+
+    _logger = logging.getLogger(LOGGER_NAME)
+    _logger.setLevel(config.get_level())
+
+    # Clear existing handlers to avoid duplicates
+    _logger.handlers = []
+
+    # Console logging with RichHandler
+    if config.console.enabled:
+        from rich.logging import RichHandler
+
+        console_handler = RichHandler(
+            show_time=False,
+            rich_tracebacks=False,
+            show_path=True if os.environ.get("AGNO_API_RUNTIME") == "dev" else False,
+            tracebacks_show_locals=False,
+        )
+        console_handler.setLevel(config.get_level())
+        console_handler.setFormatter(logging.Formatter("%(message)s"))
+        _logger.addHandler(console_handler)
+
+    # File logging with RotatingFileHandler
+    if config.file.enabled:
+        log_path = Path(config.file.path) if config.file.path else None
+
+        if log_path is None:
+            # Default log path: {config_dir}/logs/derek-agent.log
+            log_path = config_dir / "logs" / "derek-agent.log"
+
+        # Ensure log directory exists
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+
+        file_handler = RotatingFileHandler(
+            log_path,
+            maxBytes=config.file.max_bytes,
+            backupCount=config.file.backup_count,
+            encoding="utf-8",
+        )
+        file_handler.setLevel(config.get_level())
+        file_handler.setFormatter(
+            logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+        )
+        _logger.addHandler(file_handler)
+
+    logger.info(f"Logging configured: level={config.level}, console={config.console.enabled}, file={config.file.enabled}")

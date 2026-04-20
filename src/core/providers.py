@@ -1,15 +1,13 @@
 """Provider configuration management for Derek Agent Runner."""
 
-import logging
 import os
 import re
 from pathlib import Path
 from typing import Any
 
 import yaml
+from agno.utils.log import logger
 from pydantic import BaseModel, Field
-
-logger = logging.getLogger(__name__)
 
 # Default Minimax Anthropic-compatible endpoint
 MINIMAX_DEFAULT_BASE_URL = "https://api.minimax.io/anthropic"

@@ -4,12 +4,13 @@
 - Python 3.14+
 
 ## Frameworks and Libraries
-- Agno：agent runtime 與能力整合基礎。
+- Agno：agent runtime 與能力整合基礎，包含內建的 Rich logging 系統。
 - Textual：終端介面與互動元件。
 - Pydantic：資料模型與設定驗證。
 - PyYAML：YAML 設定檔解析。
 - OpenAI / Anthropic Python SDK：模型供應商整合。
 - MCP Python package：MCP client 支援。
+- Rich (via Agno)：彩色終端日誌輸出與格式化。
 
 ## Data Stores
 - SQLite：本地對話與應用資料儲存。

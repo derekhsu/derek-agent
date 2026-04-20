@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 def create_shell_tool(
     shell_config: "AgentShellConfig",
     working_dir: str | None = None,
-) -> object | None:
+) -> "ShellTools | None":
     """Create a shell tool based on agent configuration.
 
     Args:
@@ -25,16 +25,6 @@ def create_shell_tool(
     if not shell_config.enabled:
         return None
 
-    from agno.tools.shell import ShellTools
-
-    # Determine base directory: shell.base_dir > working_dir > None (current dir)
-    base_dir = None
-    if shell_config.base_dir:
-        base_dir = Path(shell_config.base_dir)
-    elif working_dir:
-        base_dir = Path(working_dir)
-
-    return ShellTools(
-        base_dir=base_dir,
-        enable_run_shell_command=True,
-    )
+    # Use secure shell tools wrapper for command filtering and safety
+    from .secure_shell_tools import create_secure_shell_tool
+    return create_secure_shell_tool(shell_config, working_dir)
